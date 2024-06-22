@@ -28,6 +28,12 @@ const database = new Databases(client, '63446ca755a041305f7f');
 // Define the HTML content in a variable
 const mailBody = '<b>Event webhook received from VERKADA to VERBUX</b>';
 
+// Define an array of valid webhook_type values
+let validWebhookTypes = [];
+
+// Send to Alarmcenter on/off !!!
+const isSendMailToAlarmCenter = false;
+
 let actCustomerNumberEbues;
 let actEventCode;
 
@@ -60,7 +66,6 @@ const transporterAlarmcenter = nodemailer.createTransport({
 });
 
 
-
 app.get("/", async (req, res) => {
     try {
         const response = await axios.get("https://m.myapp2go.de/services/API_get_keys")
@@ -78,13 +83,12 @@ app.get('/api/events', async (req, res) => {
         ]
     );
     res.send(data.documents);
-    console.log('api/ebents called!', data)
+    console.log('api/enents called!', data)
 })
 
 app.get('/ping', (req, res) => {
     const clientIp = getClientIp(req);
     const now = new Date();
-
 
     res.json({
         ip: clientIp,
@@ -95,132 +99,115 @@ app.get('/ping', (req, res) => {
 });
 
 
-/* app.get('/api/mail', async (req, res) => {
-    let data = await sendEmailCustomer('xxx')
-    console.log('api/mail called!', data)
-}) */
+// main webhook endpoint
+app.post('/webhook/:cnumber', async (req, res) => {
 
-// Define the webhook endpoint
-app.post('/webhook', async (req, res) => {
     const payload = req.body;
-    console.log('Received webhook payload:', payload);
+
+    console.log('\r\nReceived webhook payload: -->', payload);
+
+    const cnumber = req.params.cnumber;
+    console.log('\r\nExtracted number from webhook: -->', cnumber);
+
+    const vbxParameters = await getKeys(); //
+    const lenvbxParameters = vbxParameters.length;
+
+    // Extract vbx_value into a new array
+    validWebhookTypes = vbxParameters.map(doc => doc.vbx_value);
+
+
+    console.log('\r\nin fct keys test count: ', lenvbxParameters);
+
+    console.log('\r\n validWebhookTypes : ', validWebhookTypes);
+
 
     if (isValidPayload(payload)) {
 
         try {
-
             // Wait for getCustomer and getEventAssignment to complete and fill important variables
             const [actCustomerNumberEbuesCheck, actEventCodeCheck] = await Promise.all([
                 getCustomer(payload),
                 getEventAssignment(payload)
             ]);
 
-            // Wait for 0.5 seconds before calling sendEmailAlarmcenter
-            await delay(1000);
+            // Check if cnumber is corresponding to customer number
+            if (cnumber == actCustomerNumberEbues) {
 
-            // Check if important variables are filled
-            if (actCustomerNumberEbuesCheck && actEventCodeCheck) {
-                // Proceed with other functions
-                await Promise.all([
-                    insertIncomingEventNew(payload),
-                    sendEmailCustomer(payload),
-                    sendEmailAlarmcenter(payload)
-                ]);
+                // Check if important variables are filled
+                if (actCustomerNumberEbuesCheck && actEventCodeCheck) {
+                    // Proceed with other functions
+                    await Promise.all([
+                        insertIncomingEventNew(payload),
+                        sendEmailCustomer(payload),
+                        sendEmailAlarmcenter(payload)
+                    ]);
 
-
-                // After the delay, call sendEmailAlarmcenter
-                //await sendEmailAlarmcenter(payload);
-
+                    console.log('\r\nWebhook processed successfully');
+                    res.status(200).send('Webhook received and processed');
+                } else {
+                    throw new Error('Important variables in webhook not filled');
+                }
             } else {
-                throw new Error('Important variables not filled');
+                res.status(500).send('no customer service available with this number');
+                console.log('\r\nInvalid customer number: ', cnumber);
+                await insertErrorLog(payload, 'no customer service available with this number', 'CUSTOMERCHECK')
             }
 
-            console.log('Webhook processed successfully');
-            res.status(200).send('Webhook received and processed');
         } catch (error) {
             console.error('Error processing webhook:', error);
+            await insertErrorLog(payload, 'Error processing webhook', 'TECHNIQUE');
             res.status(500).send('Internal Server Error');
         }
     } else {
-        res.status(400).send('Invalid payload');
+        res.status(400).send('Invalid payload or webhook_type');
+        console.log('\r\nInvalid payload or webhook_type');
+        await insertErrorLog(payload, 'Invalid payload or webhook_type', 'PAYLOAD')
     }
 });
 
-async function sendEmailCustomer(pData) {
 
+
+async function sendEmailCustomer(pData) {
     console.log('in fct Send Message to Customer:  %s', getCurrentISOTime());
 
-    // Convert payload to a string or formatted HTML if needed
     const payloadString = JSON.stringify(pData, null, 2).replace(/\n/g, '<br>'); // Formatting JSON payload as HTML
 
-    // Setup email data
     const mailOptions = {
-        from: '"VERBUX" <noreply@verbux.eu>', // sender address
-        to: 'ralf.borde@icloud.com', // list of receivers
-        subject: 'VERBUX event received ✔', // Subject line
-        html: mailBody + '<br>' + payloadString// html body
+        from: '"VERBUX" <noreply@verbux.eu>',
+        to: 'ralf.borde@icloud.com',
+        subject: 'VERBUX event received ✔',
+        html: mailBody + '<br>' + payloadString
     };
 
-    // Send mail with defined transport object
-    transporterCustomer.sendMail(mailOptions, (error, info) => {
-        if (error) {
-            return console.log(error);
-        }
-        console.log('Message sent: %s', info.messageId);
-        console.log('Preview URL: %s', nodemailer.getTestMessageUrl(info));
-    });
-
+    try {
+        let info = await transporterCustomer.sendMail(mailOptions);
+        console.log('\r\nMessage sent to customer: %s', info.messageId);
+        console.log('\r\nPreview URL: %s', nodemailer.getTestMessageUrl(info));
+    } catch (error) {
+        console.log(error);
+        await insertErrorLog(pData, 'Customer email not sent ' + info.messageId, 'MAIL')
+    }
 }
 
 async function sendEmailAlarmcenter(pData) {
-
     console.log('in fct Send Message to AlarmCenter:  %s', getCurrentISOTime());
 
-
-    // Convert payload to a string or formatted HTML if needed
-    //const payloadString = JSON.stringify(pData, null, 2).replace(/\n/g, '<br>'); // Formatting JSON payload as HTML
-
-    // Get the current date and time
     const now = new Date();
-
-    // Convert to ISO 8601 format
     const utcDate = formatToUTC17(now);
-
-    /*  FORMAT EBUES
-      {
-           "org_id": "a7a3b638-e95b-4f00-b26a-6620236c48d7",
-           "webhook_type": "notification",
-           "created_at": 1718634936,
-           "webhook_id": "a2b0067f-c096-4bff-9d6a-5cd8a662a7fb",
-         
-           "data": {
-             "device_id": "2d9a383f-5232-4302-b007-13143102b8b9",
-             "created": 1718634933,
-             "notification_type": "alert_rule_motion",
-             "device_type": "camera",
-             "camera_id": "2d9a383f-5232-4302-b007-13143102b8b9",
-             "person_label": null,
-             "objects": [],
-             "crowd_threshold": null,
-             "image_url": "https://vmotion.prod2.command.verkada.com/notifications/thumbnail?cameraId=2d9a383f-5232-4302-b007-13143102b8b9&eventId=577a0c06-bf28-40d6-9b7f-c1707b5ed30a&eventType=alert_rule_motion",
-             "video_url": "https://command.verkada.com/cameras/2d9a383f-5232-4302-b007-13143102b8b9/history/86400/1718634933/?duration=86400&initialVideoTime=1718634933000"
-           }
-          */
 
     const payloadAlarmcenter = {
         "alarmCamera": pData.data.camera_id || pData.data.site_name,
         "alarmMessage": pData.data.event_type,
         "deviceId": pData.data.device_id,
         "eventProtocol": "VERBUX",
-        "eventText": pData.data.notification_type,
-        "eventTime": utcDate,
+        "eventText": pData.data.device_name || pData.data.site_name,
+        "eventTime": getUNIXTime(),  //utcDate
         "eventType": actEventCode,
         "eventId": pData.webhook_id,
-        "eventURL": pData.data.image_url,
+        "eventURL": pData.data.image_url || 'n/a',
         "transmittername": actCustomerNumberEbues
     }
 
-    // Convert payload to a formatted text string
     const payloadStringAlarmcenterText = `Alarm Camera: ${payloadAlarmcenter.alarmCamera}\n` +
         `Alarm Message: ${payloadAlarmcenter.alarmMessage}\n` +
         `Device ID: ${payloadAlarmcenter.deviceId}\n` +
@@ -232,50 +219,44 @@ async function sendEmailAlarmcenter(pData) {
         `Event URL: ${payloadAlarmcenter.eventURL}\n` +
         `Transmitter Name: ${payloadAlarmcenter.transmittername}`;
 
-    // Convert payload to a string or formatted HTML if needed
-    //const payloadStringAlarmcenter = JSON.stringify(payloadAlarmcenter, null, 2).replace(/\n/g, '<br>'); // Formatting JSON payload as HTML
+    console.log('\r\nMessage to AlarmCenter: \r\n %s', payloadStringAlarmcenterText);
 
-    console.log('Message to AlarmCenter:  %s', payloadStringAlarmcenterText);
-
-
-    // Setup email data
     const mailOptionsAlarmcenter = {
-        from: 'system3@ebues.local', // sender address
-        to: 'alarmserver@ebues.local', // list of receivers
-        subject: 'VERBUX to EBUES event test', // Subject line
-        text: payloadStringAlarmcenterText// text body
-        // text: payloadAlarmcenter
+        from: 'system3@ebues.local',
+        to: 'alarmserver@ebues.local',
+        subject: 'VERBUX to EBUES event test',
+        text: payloadStringAlarmcenterText
     };
 
+    if (isSendMailToAlarmCenter) {
 
-    transporterAlarmcenter.sendMail(mailOptionsAlarmcenter, (error, info) => {
-        if (error) {
-            return console.log(error);
-        }
-        console.log('Message sent ID  : %s', info.messageId);
-        console.log('Message sent info: %s', info);
-        console.log('Preview URL: %s', nodemailer.getTestMessageUrl(info));
+        try {
+            let info = await transporterAlarmcenter.sendMail(mailOptionsAlarmcenter);
+            console.log('Message sent to alatmcenter : %s', info.messageId);
+            console.log('Message sent info: %s', info);
+            console.log('Preview URL: %s', nodemailer.getTestMessageUrl(info));
 
-        // Call the async function when messageId is valid
-        if (info.messageId) {
-            try {
-                // insertIncomingEvent(mailOptions); -- mail Protokoll insert
-                console.log('Event inserted successfully.');
-            } catch (err) {
-                console.error('Failed to insert event:', err);
+            if (info.messageId) {
+                try {
+                    console.log('Event inserted successfully to HELIX.');
+                } catch (err) {
+                    console.error('Failed to insert event in HELIX:', err);
+                }
             }
+        } catch (error) {
+            console.log(error);
+            await insertErrorLog(pData, 'Alarcenter email not sent ' + info.messageId, 'MAIL')
         }
 
-    });
+    }
 
 }
 
-// Validation function to check the payload
+// Function to validate payload
 function isValidPayload(payload) {
-    // Add your validation logic here
-    // For example, checking for required fields
-    return payload && payload.data;
+    return payload && payload.data && validWebhookTypes.includes(payload.webhook_type);
 }
+
 
 function formatToUTC17(date) {
     const year = date.getUTCFullYear();
@@ -307,6 +288,16 @@ function getCurrentISOTime() {
     return new Date().toISOString(); // Returns current date and time in ISO 8601 format (UTC)
 }
 
+
+// Function to get current UNIX time
+function getUNIXTime() {
+
+    const currentDate = new Date();
+    const unixTimestamp = Math.floor(currentDate.getTime() / 1000);
+    return unixTimestamp
+
+}
+
 function generateRandomString(length) {
     const characters = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let result = '';
@@ -325,25 +316,23 @@ function delay(ms) {
 }
 
 
-/* async function getKeys() {
+async function getKeys() {
     try {
-        const response = await axios.get('https://m.myapp2go.de/services/API_get_keys');
-        const data = response.data.items.map(value => ({
 
-            KY_KEY: value.KY_KEY,
-            KY_VALUE: value.KY_VALUE,
-            KY_TEXT: value.KY_TEXT
+        let data = await database.listDocuments('63446ca755a041305f7f', '66766dc74a19c923137a'
+            ,
+            [
+                Query.equal("vbx_key", 'WEBHOOK_TYPES'),
+            ]
+        );
 
-        }));
-        console.log("mapped in array: ", data);
-
-        return data;
+        return data.documents;
         //res.send(data);
     } catch (e) {
         console.log(e.message);
     }
 }
- */
+
 /* async function migrateDatabase() {
     try {
         const migKeys = await getKeys(); // get a key-array with map from getKeys()
@@ -398,48 +387,57 @@ async function insertIncomingEvent(pPayload) {
 async function insertIncomingEventNew(pPayload) {
     try {
 
-
         const payload_stringified = JSON.stringify(pPayload);
-
-        // Convert created_at to string
         const createdAtString = pPayload.created_at.toString();
-
-        // Check if event_type is present in pPayload.data
         const eventType = pPayload.data && pPayload.data.event_type ? pPayload.data.event_type : 'n/a';
-
-        // Check device_id is present in pPayload.data
         const deviceId = pPayload.data && pPayload.data.device_id ? pPayload.data.device_id : 'n/a';
-
         const uuid = generateRandomString(10);
 
         console.log('uuid . ', uuid);
+        console.log("array payload: --> : ", pPayload);
+        console.log("array payload org_id --> : ", pPayload.org_id);
 
-        try {
-            console.log("array payload: --> : ", pPayload);
-            console.log("array payload org_id --> : ", pPayload.org_id);
+        await database.createDocument('63446ca755a041305f7f', '667456dc461c363814ad', 'unique()', {
+            'event_id': uuid,
+            'org_id': pPayload.org_id,
+            'webhook_type': pPayload.webhook_type,
+            'created_at': createdAtString,
+            'webhook_id': pPayload.webhook_id,
+            'event_type': eventType,
+            'event_json': payload_stringified,
+            'event_date': getCurrentISOTime(),
+            'event_cd1': deviceId,
+            'event_cd2': ''
+        });
 
-            await database.createDocument('63446ca755a041305f7f', '667456dc461c363814ad', 'unique()', {
+        console.log('\r\n event_incoming insert OK : ');
+    } catch (e) {
+        console.log(e.message);
+    }
+}
 
-                'event_id': uuid,
-                'org_id': pPayload.org_id,
-                'webhook_type': pPayload.webhook_type,
-                'created_at': createdAtString,
-                'webhook_id': pPayload.webhook_id,
-                'event_type': eventType,
-                'event_json': payload_stringified,
-                'event_date': getCurrentISOTime(),
-                'event_cd1': deviceId,
-                'event_cd2': ''
+async function insertErrorLog(pPayload, pMessage, pType) {
+    try {
 
-            })
+        const payload_stringified = JSON.stringify(pPayload);
 
+        //const logType = pPayload.org_id && pPayload.data.device_id ? pPayload.data.device_id : 'n/a';
 
-            console.log('event_incoming insert OK : ');
+        const uuid = generateRandomString(10);
 
-        } catch (e) {
-            console.log(e.message)
-        }
+        /* yyy */
 
+        await database.createDocument('63446ca755a041305f7f', '667698d85d98f40d9f97', 'unique()', {
+            'log_id': uuid,
+            'log_date': getCurrentISOTime(),
+            'log_sender': pPayload.org_id || 'n/a',
+            'log_message': pMessage,
+            'log_type': pType,
+            'log_json': payload_stringified
+
+        });
+
+        console.log('\r\n error log insert OK : ');
     } catch (e) {
         console.log(e.message);
     }
@@ -448,78 +446,59 @@ async function insertIncomingEventNew(pPayload) {
 
 /* Query.equal("KY_VALUE", this.actOrg_id), */
 async function getCustomer(pPayload) {
-
     console.log('in fct get Customer:  %s', getCurrentISOTime());
 
-    const promise = database.listDocuments('63446ca755a041305f7f', '63446cd877f69df94aca',
-        [
+    try {
+        const response = await database.listDocuments('63446ca755a041305f7f', '63446cd877f69df94aca', [
 
             Query.equal("org_id", pPayload.org_id),
             Query.orderDesc("$createdAt")
 
         ]);
 
-    promise.then((response) => {
-
         console.log("response customer: ", response); // Success
 
         if (response.documents.length > 0) {
             actCustomerNumberEbues = response.documents[0].number;
             console.log("actCustomerNumberEbues: ", actCustomerNumberEbues); // Store the number
-
             return actCustomerNumberEbues;
-
         } else {
             console.log("No customer found !");
+            return null;
         }
-
-
-    }, function (error) {
+    } catch (error) {
         console.log(error); // Failure
-    });
-
+        return null;
+    }
 }
 
 async function getEventAssignment(pPayload) {
-
     console.log('in fct get event assignment:  %s', getCurrentISOTime());
 
-    // Check if event_type is present in pPayload.data
     const eventTypeQuery = pPayload.data && pPayload.data.event_type
         ? Query.equal("event_type", pPayload.data.event_type)
         : Query.equal("event_type", "n/a");
 
-    const promise = database.listDocuments('63446ca755a041305f7f', '66740c9f3880e296bf97',
-        [
-
+    try {
+        const response = await database.listDocuments('63446ca755a041305f7f', '66740c9f3880e296bf97', [
             Query.equal("webhook_type", pPayload.webhook_type),
             eventTypeQuery
-            /*  Query.equal("event_type", pPayload.data.event_type)
-  */
-
         ]);
-
-    promise.then((response) => {
 
         console.log("response event_assignment: --->  ", response); // Success
 
         if (response.documents.length > 0) {
-
             actEventCode = response.documents[0].event_code;
-
             console.log("actEventCode: ", actEventCode); // Store the code
-
             return actEventCode;
-
         } else {
-            console.log("No event assinment found !");
+            console.log("No event assignment found !");
+            return null;
         }
-
-
-    }, function (error) {
+    } catch (error) {
         console.log(error); // Failure
-    });
-
+        return null;
+    }
 }
 
 /* (async() => {
